@@ -53,10 +53,13 @@ class IdentityDecomposer(traits.ProblemDecomposer, traits.SISO, Runnable):
 
 class DisjointDecomposer(traits.ProblemDecomposer, traits.SISO, Runnable):
     def __init__(self, size, variable_order, **runopts):
+
         super(DisjointDecomposer, self).__init__(**runopts)
+
         if type(variable_order) == int:
             self.variable_order = np.arange(variable_order)
-        self.partitions = np.split(variable_order, size)
+        numparts = np.ceil(len(variable_order) / size)
+        self.partitions = np.array_split(variable_order, numparts)
         self.size = size
         self.index = 0
 
