@@ -28,18 +28,18 @@ from dimod.traversal import connected_components
 import dwave_networkx as dnx
 import dwave.preprocessing
 
-from hybrid.core import Runnable, State
+from hybrid.core import Runnable, State, SampleSet
 from hybrid.exceptions import EndOfStream
 from hybrid import traits
 from hybrid.utils import (
     bqm_induced_by, flip_energy_gains, select_random_subgraph,
-    chimera_tiles)
+    chimera_tiles, min_sample)
 
 __all__ = [
     'IdentityDecomposer', 'ComponentDecomposer', 'EnergyImpactDecomposer', 
     'RandomSubproblemDecomposer', 'TilingChimeraDecomposer', 
     'RandomConstraintDecomposer', 'RoofDualityDecomposer',
-    'SublatticeDecomposer', 'make_origin_embeddings',
+    'SublatticeDecomposer', 'make_origin_embeddings', 'DisjointDecomposer', 'SNAPDecomposer'
 ]
 
 logger = logging.getLogger(__name__)
@@ -50,6 +50,69 @@ class IdentityDecomposer(traits.ProblemDecomposer, traits.SISO, Runnable):
 
     def next(self, state, **runopts):
         return state.updated(subproblem=state.problem)
+
+class DisjointDecomposer(traits.ProblemDecomposer, traits.SISO, Runnable):
+    def __init__(self, size, variable_order, **runopts):
+        super(DisjointDecomposer, self).__init__(**runopts)
+        if type(variable_order) == int:
+            self.variable_order = np.arange(variable_order)
+        self.partitions = np.split(variable_order, size)
+        self.size = size
+        self.index = 0
+
+    def __repr__(self):
+        return "{self}(size={self.size!r})".format(self=self)
+
+    def next(self, state, **runopts):
+        bqm = state.problem
+
+        size = self.size
+        if size > len(bqm):
+            logger.debug("{} subproblem size greater than the problem size, "
+                         "adapting to problem size".format(self.name))
+            size = len(bqm)
+
+        variables = self.partitions[self.index]
+        sample = state.samples.change_vartype(bqm.vartype).first.sample
+        subbqm = bqm_induced_by(bqm, variables, sample)
+        self.index = (self.index + 1) % len(self.partitions)
+        logger.debug("{} selected {} subproblem variables: {!r}".format(
+            self.name, len(variables), variables))
+        return state.updated(subproblem=subbqm, subsamples=min_sample(subbqm))
+
+class SNAPDecomposer(traits.ProblemDecomposer, traits.SISO, Runnable):
+    def __init__(self, size, variable_order, **runopts):
+        super(DisjointDecomposer, self).__init__(**runopts)
+        if type(variable_order) == int:
+            self.variable_order = np.arange(variable_order)
+        self.size = min(size, len(self.variable_order))
+        self.active = self.variable_order[:size]
+        self.active_index = 0
+        self.next_index = size % len(self.variable_order)
+
+    def __repr__(self):
+        return "{self}(size={self.size!r})".format(self=self)
+
+    def next(self, state, **runopts):
+        bqm = state.problem
+
+        size = self.size
+        if size > len(bqm):
+            logger.debug("{} subproblem size greater than the problem size, "
+                         "adapting to problem size".format(self.name))
+            size = len(bqm)
+
+        variables = self.active
+        sample = state.samples.change_vartype(bqm.vartype).first.sample
+        subbqm = bqm_induced_by(bqm, variables, sample)
+        self.active[self.active_index] = self.variable_order[self.next_index]
+        self.active_index = (self.active_index + 1) % self.size
+        self.next_index = (self.next_index + 1) % len(self.variable_order)
+
+        logger.debug("{} selected {} subproblem variables: {!r}".format(
+            self.name, len(variables), variables))
+        return state.updated(subproblem=subbqm, subsamples=min_sample(subbqm))
+
 
 class ComponentDecomposer(traits.ProblemDecomposer, traits.SISO, Runnable):
     """Selects a subproblem of variables that make up a connected component.
@@ -386,7 +449,7 @@ class EnergyImpactDecomposer(traits.ProblemDecomposer, traits.SISO, Runnable):
 
         # induce sub-bqm based on selected variables and global sample
         subbqm = bqm_induced_by(bqm, next_vars, sample)
-        return state.updated(subproblem=subbqm)
+        return state.updated(subproblem=subbqm, subsamples=min_sample(subbqm))
 
 
 class RandomSubproblemDecomposer(traits.ProblemDecomposer, traits.SISO, Runnable):
@@ -425,7 +488,7 @@ class RandomSubproblemDecomposer(traits.ProblemDecomposer, traits.SISO, Runnable
 
         logger.debug("{} selected {} subproblem variables: {!r}".format(
             self.name, len(variables), variables))
-        return state.updated(subproblem=subbqm)
+        return state.updated(subproblem=subbqm, subsamples=min_sample(subbqm))
 
 
 class SublatticeDecomposer(traits.ProblemDecomposer, traits.SISO, Runnable):
@@ -543,7 +606,7 @@ class SublatticeDecomposer(traits.ProblemDecomposer, traits.SISO, Runnable):
         logger.debug("{} selected {} subproblem variables: {!r}".format(
             self.name, len(variables), variables))
 
-        return state.updated(subproblem=subbqm, embedding=embedding)
+        return state.updated(subproblem=subbqm, subsamples=min_sample(subbqm), embedding=embedding)
 
 
 class RoofDualityDecomposer(traits.ProblemDecomposer, traits.ProblemSampler,
@@ -599,8 +662,7 @@ class RoofDualityDecomposer(traits.ProblemDecomposer, traits.ProblemSampler,
 
         # make sure the energies reflect the changes
         newsampleset.record.energy = bqm.energies(newsampleset)
-
-        return state.updated(subproblem=subbqm, samples=newsampleset)
+        return state.updated(subproblem=subbqm, subsamples=min_sample(subbqm), samples=newsampleset)
 
 
 class TilingChimeraDecomposer(traits.ProblemDecomposer, traits.EmbeddingProducing,
@@ -647,7 +709,7 @@ class TilingChimeraDecomposer(traits.ProblemDecomposer, traits.EmbeddingProducin
         variables = embedding.keys()
         sample = state.samples.change_vartype(bqm.vartype).first.sample
         subbqm = bqm_induced_by(bqm, variables, sample)
-        return state.updated(subproblem=subbqm, embedding=embedding)
+        return state.updated(subproblem=subbqm, subsamples=min_sample(subbqm), embedding=embedding)
 
 
 class RandomConstraintDecomposer(traits.ProblemDecomposer, traits.SISO, Runnable):
@@ -721,7 +783,7 @@ class RandomConstraintDecomposer(traits.ProblemDecomposer, traits.SISO, Runnable
 
         sample = state.samples.change_vartype(bqm.vartype).first.sample
         subbqm = bqm_induced_by(bqm, variables, sample)
-        return state.updated(subproblem=subbqm)
+        return state.updated(subproblem=subbqm, subsamples=min_sample(subbqm))
 
 
 def _all_minimal_covers(edgelist):
