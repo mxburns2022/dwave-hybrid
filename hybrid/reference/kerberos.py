@@ -21,7 +21,7 @@ results from QPU sampling a subproblem.
 import dimod
 import hybrid
 
-__all__ = ['Kerberos', 'KerberosSampler']
+__all__ = ['Kerberos', 'KerberosSampler', 'KerberosCustom']
 
 
 def Kerberos(max_iter=100, max_time=None, convergence=3, energy_threshold=None,
@@ -106,6 +106,94 @@ def Kerberos(max_iter=100, max_time=None, convergence=3, energy_threshold=None,
 
     return workflow
 
+
+def KerberosCustom(max_iter=100, max_time=None, convergence=3,
+                   energy_threshold=None,
+                   sa_reads=1, sa_sweeps=10000, tabu_timeout=500,
+                   custom_sampler=None, custom_params=None,
+                   max_subproblem_size=50):
+    """An opinionated hybrid asynchronous decomposition sampler for problems of
+    arbitrary structure and size. Runs Tabu search, Simulated annealing and QPU
+    subproblem sampling (for high energy impact problem variables) in parallel
+    and returns the best samples.
+
+    Kerberos workflow is used by :class:`KerberosSampler`.
+
+    Termination Criteria Args:
+
+        max_iter (int):
+            Number of iterations in the hybrid algorithm.
+
+        max_time (float/None, optional, default=None):
+            Wall clock runtime termination criterion. Unlimited by default.
+
+        convergence (int):
+            Number of iterations with no improvement that terminates sampling.
+
+        energy_threshold (float, optional):
+            Terminate when this energy threshold is surpassed. Check is
+            performed at the end of each iteration.
+
+    Simulated Annealing Parameters:
+
+        sa_reads (int):
+            Number of reads in the simulated annealing branch.
+
+        sa_sweeps (int):
+            Number of sweeps in the simulated annealing branch.
+
+    Tabu Search Parameters:
+
+        tabu_timeout (int):
+            Timeout for non-interruptable operation of tabu search (time in
+            milliseconds).
+
+    QPU Sampling Parameters:
+
+        qpu_reads (int):
+            Number of reads in the QPU branch.
+
+        qpu_sampler (:class:`dimod.Sampler`, optional, default=DWaveSampler()):
+            Quantum sampler such as a D-Wave system.
+
+        qpu_params (dict):
+            Dictionary of keyword arguments with values that will be used
+            on every call of the QPU sampler.
+
+        max_subproblem_size (int):
+            Maximum size of the subproblem selected in the QPU branch.
+
+    Returns:
+        Workflow (:class:`~hybrid.core.Runnable` instance).
+
+    """
+
+    energy_reached = None
+    if energy_threshold is not None:
+        energy_reached = lambda en: en <= energy_threshold
+    if not isinstance(custom_sampler, type):
+        assert False, (
+                "customsampler must be a type" +
+                f" not a {type(custom_sampler)}")
+    iteration = hybrid.Race(
+        hybrid.BlockingIdentity(),
+        hybrid.InterruptableTabuSampler(
+            timeout=tabu_timeout),
+        hybrid.InterruptableSimulatedAnnealingProblemSampler(
+            num_reads=sa_reads, num_sweeps=sa_sweeps),
+        hybrid.EnergyImpactDecomposer(
+                size=max_subproblem_size,
+                rolling=True,
+                rolling_history=0.3,
+                traversal='bfs')
+            | custom_sampler(**custom_params)
+            | hybrid.SplatComposer()
+    ) | hybrid.ArgMin()
+
+    workflow = hybrid.Loop(iteration, max_iter=max_iter, max_time=max_time,
+                           convergence=convergence, terminate=energy_reached)
+
+    return workflow
 
 class KerberosSampler(dimod.Sampler):
     """An opinionated dimod-compatible hybrid asynchronous decomposition sampler
